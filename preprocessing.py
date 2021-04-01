@@ -6,8 +6,8 @@ import re, string, os
 import random
 
 # Force Keras to use CPU.
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 def read_text(file):
     with open(file, "r") as f:
@@ -113,6 +113,10 @@ class TextPreprocess(tf.keras.layers.Layer):
         print("Importing Data Complete.")
         print("\t{} good entries".format(counter[label_class_map["good"]]))
         print("\t{} bad entries".format(counter[label_class_map["bad"]]))
+
+        # src_lines = np.array(src_lines).reshape(len(src_lines), 1)
+        # tgt_lines = np.array(tgt_lines).reshape(len(tgt_lines), 1)
+        # labels = np.array(labels).shape(len(labels), 1)
 
         return src_lines, tgt_lines, labels
 
