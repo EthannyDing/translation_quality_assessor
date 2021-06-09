@@ -1,7 +1,11 @@
 import tensorflow as tf
 import numpy as np
 from tensorflow import keras
-from tensorflow.keras.layers import BatchNormalization, Dense, Dropout, LayerNormalization, GlobalMaxPooling1D
+from tensorflow.keras.layers import GlobalMaxPooling1D, Dense, Bidirectional, \
+                                    LSTM, GlobalAveragePooling1D, GlobalMaxPooling1D, \
+                                    Dropout, concatenate
+import tensorflow_hub as hub
+import tensorflow_text as text
 from preprocessing import TextPreprocess
 
 
@@ -185,38 +189,128 @@ class Encoder(tf.keras.layers.Layer):
         return x  # (batch_size, input_seq_len, d_model)
 
 
-def TQC_Model(src_shape, tgt_shape,
-              num_layers, d_model, num_heads, dff,
-              src_vocab_size, tgt_vocab_size, maximum_position_encoding):
-    """The end-to-end TQC model architecture."""
-    src_encoder = Encoder(num_layers, d_model, num_heads, dff, src_vocab_size,
-                          maximum_position_encoding, rate=0.1)
-    tgt_encoder = Encoder(num_layers, d_model, num_heads, dff, tgt_vocab_size,
-                          maximum_position_encoding, rate=0.1)
-    src_input = keras.Input(src_shape)
-    tgt_input = keras.Input(tgt_shape)
+class TQC(tf.keras.Model):
 
-    src_encoder_output = src_encoder(src_input, True, None)
-    tgt_encoder_output = tgt_encoder(tgt_input, True, None)
+    def __init__(self, preprocessor_dir, LaBSE_dir, bi_lstm_dim=768, dropout_rate=0.3):
+        super(TQC, self).__init__()
+        self.preprocessor = hub.KerasLayer(preprocessor_dir, trainable=False, input_shape=(None,))
+        self.encoder = hub.KerasLayer(LaBSE_dir, trainable=False)
+        self.bi_lstm = Bidirectional(LSTM(bi_lstm_dim, return_sequences=True))
+        self.global_avg_pooling = GlobalAveragePooling1D()
+        self.global_max_pooling = GlobalMaxPooling1D()
+        self.dropout = Dropout(dropout_rate)
+        self.ff_layer1 = Dense(2048, activation="relu")
+        self.ff_layer2 = Dense(64, activation="relu")
+        self.ff_layer3 = Dense(8, activation="relu")
+        self.output_layer = Dense(1, activation="sigmoid")
 
-    # x = tf.concat([src_encoder_output, tgt_encoder_output])
-    x = LayerNormalization(epsilon=1e-6)(src_encoder_output - tgt_encoder_output)
-    x = BatchNormalization()(x)
-    x = GlobalMaxPooling1D()(x)
+    def call(self, data):
+        # src_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_src_text")
+        # tgt_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_tgt_text")
 
-    x = Dense(64, activation="relu")(x)
-    x = Dense(32, activation="relu")(x)
+        src_x = self.preprocessor(data["input_src_text"])
+        tgt_x = self.preprocessor(data["input_tgt_text"])
 
-    output = Dense(1, activation="sigmoid")(x)
+        src_x = self.encoder(src_x)["sequence_output"]
+        tgt_x = self.encoder(tgt_x)["sequence_output"]
 
-    model = keras.Model(inputs=[src_input, tgt_input], outputs=output)
+        src_x = tf.math.l2_normalize(src_x, axis=-1, epsilon=1e-12, name=None)
+        tgt_x = tf.math.l2_normalize(tgt_x, axis=-1, epsilon=1e-12, name=None)
+
+        # sequence_output = tf.concat([src_x, tgt_x], axis=-1)
+        sequence_output = concatenate([src_x, tgt_x])
+
+        # Add trainable layers on top of frozen layers to adapt the pretrained features on the new data.
+        bi_lstm = self.bi_lstm(sequence_output)
+        # Applying hybrid pooling approach to bi_lstm sequence output.
+        avg_pool = self.global_avg_pooling(bi_lstm)
+        max_pool = self.global_max_pooling(bi_lstm)
+        concat = concatenate([avg_pool, max_pool])
+        dropout = self.dropout(concat)
+
+        x = self.ff_layer1(dropout)
+        x = self.ff_layer2(x)
+        x = self.ff_layer3(8, activation="relu")(x)
+
+        output = self.output_layer(x)
+
+        return output
+
+    # def train_step(self, data):
+
+
+def build_model_with_preprocessor(max_seq_len, preprocessor_dir, LaBSE_dir):
+    src_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_src_text")
+    tgt_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_tgt_text")
+
+    preprocessor = hub.KerasLayer(preprocessor_dir, trainable=False)
+    encoder = hub.KerasLayer(LaBSE_dir, trainable=False)
+
+    src_x = preprocessor(src_texts)
+    tgt_x = preprocessor(tgt_texts)
+
+    src_x = encoder(src_x)["default"]
+    tgt_x = encoder(tgt_x)["default"]
+
+    src_x = tf.math.l2_normalize(src_x, axis=1, epsilon=1e-12, name=None)
+    tgt_x = tf.math.l2_normalize(tgt_x, axis=1, epsilon=1e-12, name=None)
+
+    # np.matmul(english_embeds, np.transpose(italian_embeds))
+    x = tf.concat([src_x, tgt_x], axis=1)
+    #  x = GlobalMaxPooling1D(x)
+
+    x = Dense(128, activation='relu')(x)
+    x = Dense(8, activation='relu')(x)
+    output = Dense(1, activation='sigmoid')(x)
+
+    model = Model([src_texts, tgt_texts], output)
 
     return model
 
-# class TQCModel(tf.keras.Model):
-#
-#     def __init__(self,):
-#         pass
+
+def build_model_with_preprocessor_and_lstm(preprocessor_dir, LaBSE_dir, softmax=False):
+    """Once softmax output layer is turned on, make sure to onehot encode labeled data to shape (n, num_classes)"""
+
+    src_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_src_text")
+    tgt_texts = tf.keras.layers.Input(shape=(), dtype=tf.string, name="input_tgt_text")
+
+    preprocessor = hub.KerasLayer(preprocessor_dir, trainable=False)
+    encoder = hub.KerasLayer(LaBSE_dir, trainable=False)
+
+    src_x = preprocessor(src_texts)
+    tgt_x = preprocessor(tgt_texts)
+
+    src_x = encoder(src_x)["sequence_output"]
+    tgt_x = encoder(tgt_x)["sequence_output"]
+
+    # src_x = tf.math.l2_normalize(src_x, axis=-1, epsilon=1e-12, name=None)
+    # tgt_x = tf.math.l2_normalize(tgt_x, axis=-1, epsilon=1e-12, name=None)
+
+    # np.matmul(english_embeds, np.transpose(italian_embeds))
+    # sequence_output = tf.concat([src_x, tgt_x], axis=-1)
+    sequence_output = concatenate([src_x, tgt_x])
+
+    # Add trainable layers on top of frozen layers to adapt the pretrained features on the new data.
+    bi_lstm = Bidirectional(LSTM(768, return_sequences=True))(sequence_output)
+    # Applying hybrid pooling approach to bi_lstm sequence output.
+    avg_pool = GlobalAveragePooling1D()(bi_lstm)
+    max_pool = GlobalMaxPooling1D()(bi_lstm)
+    concat = concatenate([avg_pool, max_pool])
+    dropout = Dropout(0.3)(concat)
+
+    x = Dense(2048, activation="relu")(dropout)
+    x = Dense(512, activation="relu")(x)
+    x = Dense(8, activation="relu")(x)
+
+    if softmax:
+        output = Dense(2, activation='softmax')(x)
+
+    else:
+        output = Dense(1, activation='sigmoid')(x)
+
+    model = keras.Model([src_texts, tgt_texts], output)
+
+    return model
 
 
 if __name__ == "__main__":
