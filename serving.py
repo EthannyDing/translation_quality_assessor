@@ -79,6 +79,15 @@ def predict_large_inputs(src_texts, tgt_texts, predict_classes=False, batch_size
     return results
 
 
+def count_good_bad_ratio():
+
+    file = "/linguistics/ethan/DL_Prototype/evaluation/FRA-ENG/law/pem_law_eng_fra_20210310.tqa_pred"
+    classes = [int(str(i).strip()) for i in read_text(file)]
+    num_good = classes.count(1)
+    num_bad = classes.count(0)
+    print("Good: {}\nBad: {}\n".format(num_good, num_bad))
+
+
 def test_predict():
 
     src_texts = ["Property Group Company Limited",
@@ -124,3 +133,4 @@ if __name__ == "__main__":
 
     # test_predict()
     test_predict_large_input_data()
+    # count_good_bad_ratio()
